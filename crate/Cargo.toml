@@ -44,7 +44,8 @@ features = [
   'EventTarget',
   'Event',
   'console',
-  'Location'
+  'Location',
+  'MessageEvent'
 ]
 
 [features]
