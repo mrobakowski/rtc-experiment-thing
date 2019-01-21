@@ -141,7 +141,7 @@ impl<G: Game + 'static> Room<G> {
                     this.web_socket.take().unwrap().close_and_cleanup();
                     this.join_client();
                 } else {
-                    log::info!("we're proooobably the host");
+                    log::debug!("we're proooobably the host");
                     this.borrow_mut().host_on_message(e);
                 }
 
