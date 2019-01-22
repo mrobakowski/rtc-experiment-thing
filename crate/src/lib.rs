@@ -6,8 +6,6 @@ use web_sys::WebSocket;
 use std::cell::RefCell;
 
 cfg_if! {
-    // When the `console_error_panic_hook` feature is enabled, we can call the
-    // `set_panic_hook` function to get better error messages if we ever panic.
     if #[cfg(feature = "console_error_panic_hook")] {
         use console_error_panic_hook::set_once as set_panic_hook;
     } else {
@@ -17,34 +15,19 @@ cfg_if! {
 }
 
 cfg_if! {
-    // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
-    // allocator.
     if #[cfg(feature = "wee_alloc")] {
         #[global_allocator]
         static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
     }
 }
 
-macro_rules! el {
-    ($storage:ident; $e: expr) => {{
-        let c = Closure::<Fn(JsValue) -> ()>::new($e);
-        $storage.push(c);
-        $storage.last().unwrap().as_ref().unchecked_ref()
-    }};
-}
-
-// Called by our JS entry point to run the example
 #[wasm_bindgen]
 pub fn run() -> Result<(), JsValue> {
-    // If the `console_error_panic_hook` feature is enabled this will set a panic hook, otherwise
-    // it will do nothing.
     set_panic_hook();
 
     console_log::init_with_level(log::Level::Debug)
         .expect("could not initialize logging");
 
-    // Use `web_sys`'s global `window` function to get a handle on the global
-    // window object.
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
     let body = document.body().expect("document should have a body");
@@ -73,7 +56,7 @@ pub fn run() -> Result<(), JsValue> {
 
     let room = Room::new(room_name, MyGame);
 
-    room.join();
+    room.join()?;
 
     Ok(())
 }
@@ -83,10 +66,22 @@ struct WebSocketAndListeners {
     listeners: Vec<Box<dyn Drop>>
 }
 
+use wasm_bindgen::convert::{FromWasmAbi, ReturnWasmAbi};
+
 impl WebSocketAndListeners {
     fn close_and_cleanup(self) {
         self.socket.close().expect("Couldn't close the websocket");
         // the listeners get dropped and cleaned up in their drop impl
+    }
+
+    fn on<F, A, R>(&mut self, event: &str, f: F) -> Result<(), JsValue>
+        where F: (FnMut(A) -> R) + 'static,
+              A: FromWasmAbi + 'static,
+              R: ReturnWasmAbi + 'static {
+        let closure = Closure::<FnMut(A) -> R>::new(f);
+        self.socket.add_event_listener_with_callback(event, closure.as_ref().unchecked_ref())?;
+        self.listeners.push(Box::new(closure));
+        Ok(())
     }
 }
 
@@ -118,10 +113,10 @@ impl<G: Game + 'static> Room<G> {
         }
     }
 
-    pub fn join(self) {
+    pub fn join(self) -> Result<(), JsValue> {
         use js_sys::JsString;
 
-        // if you love something, let set it free
+        // if you love something, set it free
         let this: &'static RefCell<Room<G>> =
             Box::leak(Box::new(RefCell::new(self)));
 
@@ -130,19 +125,24 @@ impl<G: Game + 'static> Room<G> {
 
         let mut first_message = true;
 
-        let host_on_message = Closure::<FnMut(MessageEvent) -> ()>::new(move |e: MessageEvent| {
+        let mut host_ws = WebSocketAndListeners {
+            socket: host_ws,
+            listeners: vec![]
+        };
+
+        host_ws.on("message", move |e: MessageEvent| {
             if first_message {
                 log::debug!("host_on_message 1st message");
                 console::log_1(&e);
 
+                let mut this = this.borrow_mut();
                 if JsString::try_from(&e.data()).filter(|s| *s == "The username is taken").is_some() {
                     log::debug!("The username was taken! We're not the host!");
-                    let mut this = this.borrow_mut();
                     this.web_socket.take().unwrap().close_and_cleanup();
                     this.join_client();
                 } else {
                     log::debug!("we're proooobably the host");
-                    this.borrow_mut().host_on_message(e);
+                    this.host_on_message(e);
                 }
 
                 first_message = false;
@@ -153,27 +153,18 @@ impl<G: Game + 'static> Room<G> {
                 log::debug!("I sure hope we're the host");
                 this.borrow_mut().host_on_message(e);
             }
-        });
+        })?;
 
-        host_ws.add_event_listener_with_callback("message", host_on_message.as_ref().unchecked_ref())
-            .expect("cannot add message event listener");
-
-        let host_ws_clone = host_ws.clone();
-
-        let host_on_connected = Closure::<FnMut(Event) -> ()>::new(move |e: Event| {
-            host_ws_clone.send_with_str(r#"{
+        host_ws.on("open", move |e: Event| {
+            this.borrow().web_socket.as_ref().unwrap().socket.send_with_str(r#"{
                 "protocol": "one-to-self",
                 "type": "host-confirmation-message"
             }"#).expect("Couldn't send self-message");
-        });
+        })?;
 
-        host_ws.add_event_listener_with_callback("open", host_on_connected.as_ref().unchecked_ref())
-            .expect("Could not add open event listener");
+        this.borrow_mut().web_socket = Some(host_ws);
 
-        this.borrow_mut().web_socket = Some(WebSocketAndListeners {
-            socket: host_ws,
-            listeners: vec![Box::new(host_on_message), Box::new(host_on_connected)]
-        });
+        Ok(())
     }
 
     fn join_client(&mut self) {
