@@ -54,9 +54,7 @@ pub fn run() -> Result<(), JsValue> {
         type Message = ();
     }
 
-    let room = Room::new(room_name, MyGame);
-
-    room.join()?;
+    let room = Room::join(room_name, MyGame)?;
 
     Ok(())
 }
@@ -69,6 +67,13 @@ struct WebSocketAndListeners {
 use wasm_bindgen::convert::{FromWasmAbi, ReturnWasmAbi};
 
 impl WebSocketAndListeners {
+    fn new(address: &str) -> Result<WebSocketAndListeners, JsValue> {
+        Ok(WebSocketAndListeners {
+            socket: WebSocket::new(address)?,
+            listeners: vec![]
+        })
+    }
+
     fn close_and_cleanup(self) {
         self.socket.close().expect("Couldn't close the websocket");
         // the listeners get dropped and cleaned up in their drop impl
@@ -85,11 +90,12 @@ impl WebSocketAndListeners {
     }
 }
 
-struct Room<G> {
+struct Room<G: 'static> {
     game: G,
     name: String,
     web_socket: Option<WebSocketAndListeners>,
-    is_host: bool
+    is_host: bool,
+    this: &'static RefCell<Self>
 }
 
 trait Game {
@@ -102,33 +108,33 @@ trait Game {
 }
 
 use web_sys::{MessageEvent, Event};
+use rand::distributions::Alphanumeric;
+use rand::thread_rng;
+use rand::distributions::Distribution;
 
 impl<G: Game + 'static> Room<G> {
-    pub fn new(name: impl Into<String>, game: G) -> Room<G> {
-        Room {
+
+    pub fn join(name: impl Into<String>, game: G) -> Result<&'static RefCell<Self>, JsValue> {
+        use js_sys::JsString;
+
+        let this = Room {
             name: name.into(),
             game,
             web_socket: None,
-            is_host: false
-        }
-    }
-
-    pub fn join(self) -> Result<(), JsValue> {
-        use js_sys::JsString;
+            is_host: false,
+            this: unsafe { std::mem::uninitialized() }
+        };
 
         // if you love something, set it free
-        let this: &'static RefCell<Room<G>> =
-            Box::leak(Box::new(RefCell::new(self)));
+        let this: &'static RefCell<Room<G>> = Box::leak(Box::new(RefCell::new(this)));
 
-        let host_ws = WebSocket::new(&format!("ws://localhost:8000?user={}-host", this.borrow().name))
-            .expect("cannot open websocket");
+        // forget the uninitialized value to prevent Ancient Ones taking over this code
+        std::mem::forget(std::mem::replace(&mut this.borrow_mut().this, this));
+
+
+        let mut host_ws = WebSocketAndListeners::new(&format!("ws://localhost:8000?user={}-host", this.borrow().name))?;
 
         let mut first_message = true;
-
-        let mut host_ws = WebSocketAndListeners {
-            socket: host_ws,
-            listeners: vec![]
-        };
 
         host_ws.on("message", move |e: MessageEvent| {
             if first_message {
@@ -142,6 +148,7 @@ impl<G: Game + 'static> Room<G> {
                     this.join_client();
                 } else {
                     log::debug!("we're proooobably the host");
+                    this.init_host();
                     this.host_on_message(e);
                 }
 
@@ -156,19 +163,31 @@ impl<G: Game + 'static> Room<G> {
         })?;
 
         host_ws.on("open", move |e: Event| {
-            this.borrow().web_socket.as_ref().unwrap().socket.send_with_str(r#"{
-                "protocol": "one-to-self",
-                "type": "host-confirmation-message"
-            }"#).expect("Couldn't send self-message");
+            this.borrow().web_socket.as_ref().unwrap().socket
+                .send_with_str(r#"{"protocol": "one-to-self", "type": "host-confirmation-message"}"#)
+                .expect("Couldn't send self-message");
         })?;
 
         this.borrow_mut().web_socket = Some(host_ws);
 
+        Ok(this)
+    }
+
+    fn join_client(&mut self) -> Result<(), JsValue> {
+        self.is_host = false;
+
+        web_sys::window().expect("no global `window` exists").document().expect("document doesn't exist").set_title("Client: RTC Experiment");
+        let client_username: String = Alphanumeric.sample_iter(&mut thread_rng()).take(5).collect();
+        let ws = WebSocketAndListeners::new(&format!("ws://localhost:8000?user={}-{}", self.name, client_username))?;
+
+
         Ok(())
     }
 
-    fn join_client(&mut self) {
+    fn init_host(&mut self) {
+        self.is_host = true;
 
+        web_sys::window().expect("no global `window` exists").document().expect("document doesn't exist").set_title("Host: RTC Experiment");
     }
 
     fn host_on_message(&mut self, m: MessageEvent) {}
