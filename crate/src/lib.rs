@@ -59,34 +59,14 @@ pub fn run() -> Result<(), JsValue> {
     Ok(())
 }
 
-struct WebSocketAndListeners {
-    socket: WebSocket,
-    listeners: Vec<Box<dyn Drop>>
-}
+type WebSocketAndListeners = EventTargetWrapper<WebSocket>;
 
 use wasm_bindgen::convert::{FromWasmAbi, ReturnWasmAbi};
 
 impl WebSocketAndListeners {
-    fn new(address: &str) -> Result<WebSocketAndListeners, JsValue> {
-        Ok(WebSocketAndListeners {
-            socket: WebSocket::new(address)?,
-            listeners: vec![]
-        })
-    }
-
     fn close_and_cleanup(self) {
-        self.socket.close().expect("Couldn't close the websocket");
+        self.inner.close().expect("Couldn't close the websocket");
         // the listeners get dropped and cleaned up in their drop impl
-    }
-
-    fn on<F, A, R>(&mut self, event: &str, f: F) -> Result<(), JsValue>
-        where F: (FnMut(A) -> R) + 'static,
-              A: FromWasmAbi + 'static,
-              R: ReturnWasmAbi + 'static {
-        let closure = Closure::<FnMut(A) -> R>::new(f);
-        self.socket.add_event_listener_with_callback(event, closure.as_ref().unchecked_ref())?;
-        self.listeners.push(Box::new(closure));
-        Ok(())
     }
 }
 
@@ -95,7 +75,7 @@ struct Room<G: 'static> {
     name: String,
     web_socket: Option<WebSocketAndListeners>,
     is_host: bool,
-    this: &'static RefCell<Self>
+    this: &'static RefCell<Self>,
 }
 
 trait Game {
@@ -107,13 +87,12 @@ trait Game {
     fn on_disconnected(&mut self) {}
 }
 
-use web_sys::{MessageEvent, Event, RtcPeerConnection};
+use web_sys::{MessageEvent, Event, RtcPeerConnection, RtcPeerConnectionIceEvent};
 use rand::distributions::Alphanumeric;
 use rand::thread_rng;
 use rand::distributions::Distribution;
 
 impl<G: Game + 'static> Room<G> {
-
     pub fn join(name: impl Into<String>, game: G) -> Result<&'static RefCell<Self>, JsValue> {
         use js_sys::JsString;
 
@@ -122,7 +101,7 @@ impl<G: Game + 'static> Room<G> {
             game,
             web_socket: None,
             is_host: false,
-            this: unsafe { std::mem::uninitialized() }
+            this: unsafe { std::mem::uninitialized() },
         };
 
         // if you love something, set it free
@@ -132,7 +111,7 @@ impl<G: Game + 'static> Room<G> {
         std::mem::forget(std::mem::replace(&mut this.borrow_mut().this, this));
 
 
-        let mut host_ws = WebSocketAndListeners::new(&format!("ws://localhost:8000?user={}-host", this.borrow().name))?;
+        let mut host_ws = EventTargetWrapper::new(WebSocket::new(&format!("ws://localhost:8000?user={}-host", this.borrow().name))?);
 
         let mut first_message = true;
 
@@ -159,7 +138,7 @@ impl<G: Game + 'static> Room<G> {
         })?;
 
         host_ws.on("open", move |e: Event| {
-            this.borrow().web_socket.as_ref().unwrap().socket
+            this.borrow().web_socket.as_ref().unwrap()
                 .send_with_str(r#"{"protocol": "one-to-self", "type": "host-confirmation-message"}"#)
                 .expect("Couldn't send self-message");
         })?;
@@ -174,17 +153,44 @@ impl<G: Game + 'static> Room<G> {
 
         web_sys::window().expect("no global `window` exists").document().expect("document doesn't exist").set_title("Client: RTC Experiment");
         let client_username: String = Alphanumeric.sample_iter(&mut thread_rng()).take(5).collect();
-        let mut ws = WebSocketAndListeners::new(&format!("ws://localhost:8000?user={}-{}", self.name, client_username))?;
-        let mut rtc = RtcPeerConnection::new()?;
-        let host_connection  = rtc.create_data_channel("hostConnection");
+        let mut ws = WebSocketAndListeners::new(WebSocket::new(&format!("ws://localhost:8000?user={}-{}", self.name, client_username))?);
+        let mut rtc = EventTargetWrapper::new(RtcPeerConnection::new()?);
+        let host_connection = rtc.create_data_channel("hostConnection");
+
+        rtc.on("icecandidate", |e: RtcPeerConnectionIceEvent| {
+            // send ice candidate to host via websocket
+        })?;
+
+        let mut closures = vec![];
+
+//        localConnection.createOffer()
+//            .then(offer => localConnection.setLocalDescription(offer))
+//            .then(() => remoteConnection.setRemoteDescription(localConnection.localDescription))
+//            .then(() => remoteConnection.createAnswer())
+//            .then(answer => remoteConnection.setLocalDescription(answer))
+//            .then(() => localConnection.setRemoteDescription(remoteConnection.localDescription))
+//            .catch(handleCreateDescriptionError);
+
+        macro_rules! c {
+            ($x: expr) => {{
+                let closure = Closure::<dyn FnMut(JsValue) -> _>::new($x);
+                closures.push(closure);
+                unsafe { std::mem::transmute(closures.last().unwrap()) } // TODO: ???
+            }};
+        }
+
+        rtc.create_offer()
+            .then(c!(|offer: JsValue| rtc.inner.set_local_description(offer.unchecked_ref())))
+            .then(unimplemented!());
+
 
         let connect_payload = "";
 
         let this: &'static RefCell<Room<G>> = self.this;
         ws.on("open", move |e: Event| {
-            this.borrow().web_socket.as_ref().unwrap().socket
+            this.borrow().web_socket.as_ref().unwrap()
                 .send_with_str(&format!(r#"{{"protocol": "one-to-one", "to": "{}-host", "type": "rtc-request", "payload": "{}"}}"#, this.borrow().name, connect_payload))
-        });
+        })?;
 
         self.web_socket = Some(ws);
 
@@ -198,7 +204,44 @@ impl<G: Game + 'static> Room<G> {
     }
 
     fn host_on_message(&mut self, m: MessageEvent) {
-        log::info!("host: received message");
+        log::debug!("host: received message");
         console::log_1(&m);
+    }
+}
+
+use web_sys::EventTarget;
+use std::ops::Deref;
+use std::ops::DerefMut;
+
+struct EventTargetWrapper<T> {
+    inner: T,
+    listeners: Vec<Box<dyn Drop>>,
+}
+
+impl<T> Deref for EventTargetWrapper<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> DerefMut for EventTargetWrapper<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T> EventTargetWrapper<T> where T: Deref<Target=EventTarget> {
+    fn new(inner: T) -> Self { EventTargetWrapper { inner, listeners: vec![] } }
+
+    fn on<F, A, R>(&mut self, event: &str, f: F) -> Result<(), JsValue>
+        where F: (FnMut(A) -> R) + 'static,
+              A: FromWasmAbi + 'static,
+              R: ReturnWasmAbi + 'static {
+        let closure = Closure::<FnMut(A) -> R>::new(f);
+        self.add_event_listener_with_callback(event, closure.as_ref().unchecked_ref())?;
+        self.listeners.push(Box::new(closure));
+        Ok(())
     }
 }
