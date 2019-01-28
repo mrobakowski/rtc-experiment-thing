@@ -18,7 +18,7 @@ wasm-bindgen =  { version = "0.2.33", features = ["nightly"] }
 js-sys = "0.3.10"
 log = "0.4.6"
 console_log = "0.1.2"
-rand = "0.6.4"
+rand = { version = "0.6.4", features = ["wasm-bindgen"] }
 # The `console_error_panic_hook` crate provides better debugging of panics by
 # logging them with `console.error`. This is great for development, but requires
 # all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
@@ -40,6 +40,7 @@ features = [
   'Node',
   'Window',
   'RtcPeerConnection',
+  'RtcDataChannel',
   'WebSocket',
   'EventTarget',
   'Event',
@@ -47,6 +48,9 @@ features = [
   'Location',
   'MessageEvent'
 ]
+
+[dev-dependencies]
+rustysignal = "1.0.1"
 
 [features]
 default = ["console_error_panic_hook"]

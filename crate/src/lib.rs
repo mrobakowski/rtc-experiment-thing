@@ -107,7 +107,7 @@ trait Game {
     fn on_disconnected(&mut self) {}
 }
 
-use web_sys::{MessageEvent, Event};
+use web_sys::{MessageEvent, Event, RtcPeerConnection};
 use rand::distributions::Alphanumeric;
 use rand::thread_rng;
 use rand::distributions::Distribution;
@@ -147,17 +147,13 @@ impl<G: Game + 'static> Room<G> {
                     this.web_socket.take().unwrap().close_and_cleanup();
                     this.join_client();
                 } else {
-                    log::debug!("we're proooobably the host");
+                    log::debug!("we're probably the host");
                     this.init_host();
                     this.host_on_message(e);
                 }
 
                 first_message = false;
             } else {
-                log::debug!("host_on_message not first message");
-                console::log_1(&e);
-
-                log::debug!("I sure hope we're the host");
                 this.borrow_mut().host_on_message(e);
             }
         })?;
@@ -178,8 +174,19 @@ impl<G: Game + 'static> Room<G> {
 
         web_sys::window().expect("no global `window` exists").document().expect("document doesn't exist").set_title("Client: RTC Experiment");
         let client_username: String = Alphanumeric.sample_iter(&mut thread_rng()).take(5).collect();
-        let ws = WebSocketAndListeners::new(&format!("ws://localhost:8000?user={}-{}", self.name, client_username))?;
+        let mut ws = WebSocketAndListeners::new(&format!("ws://localhost:8000?user={}-{}", self.name, client_username))?;
+        let mut rtc = RtcPeerConnection::new()?;
+        let host_connection  = rtc.create_data_channel("hostConnection");
 
+        let connect_payload = "";
+
+        let this: &'static RefCell<Room<G>> = self.this;
+        ws.on("open", move |e: Event| {
+            this.borrow().web_socket.as_ref().unwrap().socket
+                .send_with_str(&format!(r#"{{"protocol": "one-to-one", "to": "{}-host", "type": "rtc-request", "payload": "{}"}}"#, this.borrow().name, connect_payload))
+        });
+
+        self.web_socket = Some(ws);
 
         Ok(())
     }
@@ -190,5 +197,8 @@ impl<G: Game + 'static> Room<G> {
         web_sys::window().expect("no global `window` exists").document().expect("document doesn't exist").set_title("Host: RTC Experiment");
     }
 
-    fn host_on_message(&mut self, m: MessageEvent) {}
+    fn host_on_message(&mut self, m: MessageEvent) {
+        log::info!("host: received message");
+        console::log_1(&m);
+    }
 }
