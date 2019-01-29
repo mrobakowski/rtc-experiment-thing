@@ -124,7 +124,7 @@ impl<G: Game + 'static> Room<G> {
                 if JsString::try_from(&e.data()).filter(|s| *s == "The username is taken").is_some() {
                     log::debug!("The username was taken! We're not the host!");
                     this.web_socket.take().unwrap().close_and_cleanup();
-                    this.join_client();
+                    this.join_client().unwrap();
                 } else {
                     log::debug!("we're probably the host");
                     this.init_host();
@@ -153,44 +153,15 @@ impl<G: Game + 'static> Room<G> {
 
         web_sys::window().expect("no global `window` exists").document().expect("document doesn't exist").set_title("Client: RTC Experiment");
         let client_username: String = Alphanumeric.sample_iter(&mut thread_rng()).take(5).collect();
-        let mut ws = WebSocketAndListeners::new(WebSocket::new(&format!("ws://localhost:8000?user={}-{}", self.name, client_username))?);
+
+        let host_name = format!("{}-{}", self.name, "host");
+        let self_name = format!("{}-{}", self.name, client_username);
+
+        let mut ws = WebSocketAndListeners::new(WebSocket::new(&format!("ws://localhost:8000?user={}", self_name))?);
         let mut rtc = EventTargetWrapper::new(RtcPeerConnection::new()?);
         let host_connection = rtc.create_data_channel("hostConnection");
 
-        rtc.on("icecandidate", |e: RtcPeerConnectionIceEvent| {
-            // send ice candidate to host via websocket
-        })?;
-
-        let mut closures = vec![];
-
-//        localConnection.createOffer()
-//            .then(offer => localConnection.setLocalDescription(offer))
-//            .then(() => remoteConnection.setRemoteDescription(localConnection.localDescription))
-//            .then(() => remoteConnection.createAnswer())
-//            .then(answer => remoteConnection.setLocalDescription(answer))
-//            .then(() => localConnection.setRemoteDescription(remoteConnection.localDescription))
-//            .catch(handleCreateDescriptionError);
-
-        macro_rules! c {
-            ($x: expr) => {{
-                let closure = Closure::<dyn FnMut(JsValue) -> _>::new($x);
-                closures.push(closure);
-                unsafe { std::mem::transmute(closures.last().unwrap()) } // TODO: ???
-            }};
-        }
-
-        rtc.create_offer()
-            .then(c!(|offer: JsValue| rtc.inner.set_local_description(offer.unchecked_ref())))
-            .then(unimplemented!());
-
-
-        let connect_payload = "";
-
-        let this: &'static RefCell<Room<G>> = self.this;
-        ws.on("open", move |e: Event| {
-            this.borrow().web_socket.as_ref().unwrap()
-                .send_with_str(&format!(r#"{{"protocol": "one-to-one", "to": "{}-host", "type": "rtc-request", "payload": "{}"}}"#, this.borrow().name, connect_payload))
-        })?;
+        init_rtc_client(&rtc, &ws, &host_name, &self_name)?;
 
         self.web_socket = Some(ws);
 
@@ -206,6 +177,18 @@ impl<G: Game + 'static> Room<G> {
     fn host_on_message(&mut self, m: MessageEvent) {
         log::debug!("host: received message");
         console::log_1(&m);
+        use js_sys::JSON;
+        let parsed_message = JSON::parse(&m.data().as_string().unwrap()).unwrap();
+        use js_sys::Reflect;
+        let typ = &JsValue::from_str("type");
+        if Reflect::has(&parsed_message, typ).unwrap() &&
+            Reflect::get(&parsed_message, typ).unwrap().as_string().unwrap() == "rtc-offer" { // TODO: make this not panic on all those unwraps
+            let rtc = RtcPeerConnection::new().unwrap();
+            let host_name = format!("{}-{}", self.name, "host");
+            let client_name = Reflect::get(&parsed_message, &JsValue::from_str("from")).unwrap().as_string().unwrap();
+            let ws = &*self.web_socket.as_ref().unwrap();
+            init_rtc_host(&rtc, ws, &host_name, &client_name, &Reflect::get(&parsed_message, &JsValue::from_str("payload")).unwrap()).unwrap();
+        }
     }
 }
 
@@ -244,4 +227,13 @@ impl<T> EventTargetWrapper<T> where T: Deref<Target=EventTarget> {
         self.listeners.push(Box::new(closure));
         Ok(())
     }
+}
+
+#[wasm_bindgen(module = "./../../js/rtc")]
+extern "C" {
+    #[wasm_bindgen(catch)]
+    fn init_rtc_client(rtc: &RtcPeerConnection, ws: &WebSocket, host_name: &str, self_name: &str) -> Result<(), JsValue>;
+
+    #[wasm_bindgen(catch)]
+    fn init_rtc_host(rtc: &RtcPeerConnection, ws: &WebSocket, host_name: &str, client_name: &str, offer: &JsValue) -> Result<(), JsValue>;
 }
