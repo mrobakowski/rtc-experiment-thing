@@ -1,9 +1,30 @@
 use cfg_if::cfg_if;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
-use web_sys::console;
-use web_sys::WebSocket;
-use std::cell::RefCell;
+use wasm_bindgen::{
+    prelude::*,
+    JsCast,
+    convert::{FromWasmAbi, ReturnWasmAbi},
+};
+use web_sys::{
+    console,
+    WebSocket,
+    MessageEvent,
+    Event,
+    RtcPeerConnection,
+    EventTarget,
+};
+use std::{
+    cell::RefCell,
+    ops::{Deref, DerefMut},
+};
+use js_sys::{
+    Reflect,
+    JSON,
+    JsString,
+};
+use rand::{
+    distributions::{Alphanumeric, Distribution},
+    thread_rng,
+};
 
 cfg_if! {
     if #[cfg(feature = "console_error_panic_hook")] {
@@ -61,7 +82,6 @@ pub fn run() -> Result<(), JsValue> {
 
 type WebSocketAndListeners = EventTargetWrapper<WebSocket>;
 
-use wasm_bindgen::convert::{FromWasmAbi, ReturnWasmAbi};
 
 impl WebSocketAndListeners {
     fn close_and_cleanup(self) {
@@ -75,7 +95,6 @@ struct Room<G: 'static> {
     name: String,
     web_socket: Option<WebSocketAndListeners>,
     is_host: bool,
-    this: &'static RefCell<Self>,
 }
 
 trait Game {
@@ -87,29 +106,18 @@ trait Game {
     fn on_disconnected(&mut self) {}
 }
 
-use web_sys::{MessageEvent, Event, RtcPeerConnection, RtcPeerConnectionIceEvent};
-use rand::distributions::Alphanumeric;
-use rand::thread_rng;
-use rand::distributions::Distribution;
 
 impl<G: Game + 'static> Room<G> {
     pub fn join(name: impl Into<String>, game: G) -> Result<&'static RefCell<Self>, JsValue> {
-        use js_sys::JsString;
-
         let this = Room {
             name: name.into(),
             game,
             web_socket: None,
             is_host: false,
-            this: unsafe { std::mem::uninitialized() },
         };
 
         // if you love something, set it free
         let this: &'static RefCell<Room<G>> = Box::leak(Box::new(RefCell::new(this)));
-
-        // forget the uninitialized value to prevent Ancient Ones taking over this code
-        std::mem::forget(std::mem::replace(&mut this.borrow_mut().this, this));
-
 
         let mut host_ws = EventTargetWrapper::new(WebSocket::new(&format!("ws://localhost:8000?user={}-host", this.borrow().name))?);
 
@@ -157,8 +165,8 @@ impl<G: Game + 'static> Room<G> {
         let host_name = format!("{}-{}", self.name, "host");
         let self_name = format!("{}-{}", self.name, client_username);
 
-        let mut ws = WebSocketAndListeners::new(WebSocket::new(&format!("ws://localhost:8000?user={}", self_name))?);
-        let mut rtc = EventTargetWrapper::new(RtcPeerConnection::new()?);
+        let ws = WebSocketAndListeners::new(WebSocket::new(&format!("ws://localhost:8000?user={}", self_name))?);
+        let rtc = EventTargetWrapper::new(RtcPeerConnection::new()?);
         let host_connection = rtc.create_data_channel("hostConnection");
 
         init_rtc_client(&rtc, &ws, &host_name, &self_name)?;
@@ -177,12 +185,7 @@ impl<G: Game + 'static> Room<G> {
     fn host_on_message(&mut self, m: MessageEvent) {
         log::debug!("host: received message");
         console::log_1(&m);
-        use js_sys::JSON;
-        let parsed_message = JSON::parse(&m.data().as_string().unwrap()).unwrap();
-        use js_sys::Reflect;
-        let typ = &JsValue::from_str("type");
-        if Reflect::has(&parsed_message, typ).unwrap() &&
-            Reflect::get(&parsed_message, typ).unwrap().as_string().unwrap() == "rtc-offer" { // TODO: make this not panic on all those unwraps
+        if let Some(parsed_message) = maybe_etc_offer(&m) {
             let rtc = RtcPeerConnection::new().unwrap();
             let host_name = format!("{}-{}", self.name, "host");
             let client_name = Reflect::get(&parsed_message, &JsValue::from_str("from")).unwrap().as_string().unwrap();
@@ -192,9 +195,16 @@ impl<G: Game + 'static> Room<G> {
     }
 }
 
-use web_sys::EventTarget;
-use std::ops::Deref;
-use std::ops::DerefMut;
+fn maybe_etc_offer(m: &MessageEvent) -> Option<JsValue> {
+    let parsed_message = JSON::parse(&m.data().as_string()?).ok()?;
+    let typ = &JsValue::from_str("type");
+    if Reflect::has(&parsed_message, typ).ok()? && Reflect::get(&parsed_message, typ).ok()?.as_string()? == "rtc-offer" {
+        Some(parsed_message)
+    } else {
+        None
+    }
+}
+
 
 struct EventTargetWrapper<T> {
     inner: T,
