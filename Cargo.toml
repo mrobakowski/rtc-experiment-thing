@@ -1,0 +1,17 @@
+[package]
+authors = ["Mikołaj Robakowski <mikolaj.rob@gmail.com>"]
+license = "MIT"
+name = "rtc-experiment-thingy"
+repository = "https://github.com/mrobakowski/rtc-experiment-thingy"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+stdweb = "0.4.17"
+stdweb-derive = "0.5.1"
+rand = { version = "0.6.5", features = ["stdweb"] }
+serde = "1.0.90"
+serde_json = "1.0.39"
+
+[dev-dependencies]
+rustysignal = "2.0.2"

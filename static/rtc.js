@@ -1,10 +1,15 @@
-export async function init_rtc_client(rtc, ws, hostName, selfName) {
-    setUpIce(rtc, ws, selfName, hostName);
+async function waitOnWsIfNotOpen(ws) {
+    if (ws.readyState !== 1) {
+        await new Promise((resolve) => ws.addEventListener('open', () => resolve(), {once: true}));
+    }
+}
 
-    await new Promise((resolve) => ws.addEventListener('open', () => resolve(), {once: true}));
+async function initRtcClient(rtc, ws, hostName, selfName) {
+    await waitOnWsIfNotOpen(ws);
 
     let offer = await rtc.createOffer();
     await rtc.setLocalDescription(offer);
+    setUpIce(rtc, ws, selfName, hostName);
 
     ws.send(JSON.stringify({
         protocol: "one-to-one",
@@ -31,21 +36,21 @@ export async function init_rtc_client(rtc, ws, hostName, selfName) {
             ws.removeEventListener('message', listener);
         }
 
-
         ws.addEventListener('message', listener);
     };
 
     let answer = await new Promise(resolve => mkListener(resolve));
 
     await rtc.setRemoteDescription(answer);
+
+    console.log("connection to host initialized");
 }
 
-export async function init_rtc_host(rtc, ws, hostName, clientName, offer) {
-    setUpIce(rtc, ws, hostName, clientName);
-    await new Promise((resolve) => ws.addEventListener('open', () => resolve(), {once: true}));
+async function initRtcHost(rtc, ws, hostName, clientName, offer) {
+    await waitOnWsIfNotOpen(ws);
 
     await rtc.setRemoteDescription(offer);
-
+    setUpIce(rtc, ws, hostName, clientName);
     let answer = await rtc.createAnswer();
     await rtc.setLocalDescription(answer);
 
@@ -55,7 +60,9 @@ export async function init_rtc_host(rtc, ws, hostName, clientName, offer) {
         from: hostName,
         type: "rtc-answer",
         payload: answer
-    }))
+    }));
+
+    console.log("sent rtc-answer to the client");
 }
 
 function setUpIce(rtc, ws, local, remote) {
@@ -74,7 +81,13 @@ function setUpIce(rtc, ws, local, remote) {
     ws.addEventListener('message', e => {
         let parsed = JSON.parse(e.data);
         if (parsed && parsed.from && parsed.from === remote && parsed.type && parsed.type === "ice-candidate") {
-            rtc.addIceCandidate(parsed.payload);
+            console.log('ice candidate: ', parsed.payload);
+            rtc.addIceCandidate(parsed.payload).catch(console.error);
         }
     });
 }
+
+window.initRtc = {
+    client: initRtcClient,
+    host: initRtcHost
+};
